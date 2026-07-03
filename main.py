@@ -1,15 +1,31 @@
+# --- IMPORTS (Ensure these are at the very top) ---
 import os
 import sqlite3
 import time
 import streamlit as st
 import pandas as pd
 from datetime import datetime
-from dotenv import load_dotenv
-from google import genai
-from google.genai import types
-from googlesearch import search
-from PIL import Image
+import firebase_admin
+from firebase_admin import credentials, db
+import json
 
+# --- FIREBASE INIT (MUST BE AT THE TOP) ---
+if not firebase_admin._apps:
+    try:
+        if "FIREBASE_CREDENTIALS" in st.secrets:
+            # Use Streamlit Cloud Secrets
+            cred_dict = json.loads(st.secrets["FIREBASE_CREDENTIALS"])
+        else:
+            # Fallback to local file for development
+            with open("firebase_key.json", "r") as f:
+                cred_dict = json.load(f)
+        
+        cred = credentials.Certificate(cred_dict)
+        firebase_admin.initialize_app(cred, {
+            'databaseURL': 'https://test-mode-a344c-default-rtdb.asia-southeast1.firebasedatabase.app/'
+        })
+    except Exception as e:
+        st.error(f"Failed to initialize Firebase: {e}")
 # Load environment variables
 load_dotenv()
 
@@ -185,30 +201,23 @@ if not firebase_admin._apps:
     })
 
 # 3. Use this updated function
+# --- UPDATED DATABASE FUNCTION ---
 def update_mileage_in_db(vehicle_id, new_mileage):
     try:
-        # Explicitly reference the initialized database
-        root = db.reference('users')
-        users = root.get()
+        # Access the user node directly to find the vehicle
+        users_ref = db.reference('users')
+        users = users_ref.get()
         
         if users:
             for user_id, user_data in users.items():
                 if 'vehicles' in user_data and vehicle_id in user_data['vehicles']:
-                    db.reference(f'users/{user_id}/vehicles/{vehicle_id}').update({'current_mileage': int(new_mileage)})
+                    # Update path: users/{user_id}/vehicles/{vehicle_id}
+                    db.reference(f'users/{user_id}/vehicles/{vehicle_id}').update({
+                        'current_mileage': int(new_mileage)
+                    })
                     return True
     except Exception as e:
-        st.error(f"Database error: {e}")
-    return False
-    
-    if users:
-        for user_id, user_data in users.items():
-            if 'vehicles' in user_data:
-                # Check if this vehicle exists under this user
-                if vehicle_id in user_data['vehicles']:
-                    # Build the exact path: users/Rider_Alpha/vehicles/-OwaPM...
-                    path = f'users/{user_id}/vehicles/{vehicle_id}'
-                    db.reference(path).update({'current_mileage': int(new_mileage)})
-                    return True # Successfully updated
+        st.error(f"Database update failed: {e}")
     return False
 
 def update_vehicle_details(vehicle_id: int, make: str, model: str, year: int, color: str):
