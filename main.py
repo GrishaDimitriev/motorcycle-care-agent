@@ -37,23 +37,21 @@ def check_my_bike_service_status() -> str:
         return f"System Log: The {MY_BIKE.make} is overdue for an oil change by {abs(km_remaining)} km."
     return f"System Log: The oil is currently fine. {km_remaining} km left until the next change."
 
-
 # 4. Set up System Instructions telling the AI how to behave
 system_instruction = f"""
 You are 'MotoMechanic AI', an expert motorcycle technician. 
 You are talking to a rider who owns a {MY_BIKE.year} {MY_BIKE.make} {MY_BIKE.model}.
 
-Whenever the user asks you about their maintenance schedule, oil status, or if they need a service, you MUST execute the `check_my_bike_service_status` tool to read their data log before replying. Use the info from that log to answer them conversationally.
+Whenever the user asks you about their maintenance schedule, oil status, or if they need a service, you MUST execute the `check_my_bike_service_status` tool to read their data log before replying. 
+
+Be conversational, helpful, and concise.
+Safety Rule: Always tell the user to check their factory service manual for structural engine or brake repairs.
 """
 
-user_message = "Hey mechanic, can you check if I need to change my oil soon?"
-
-print("Sending request to Gemini Agent (with active tools)...\n")
-
-# Using the automatic tool calling engine
-response = client.models.generate_content(
+# 5. Initialize a persistent Chat Session with Memory and Tools
+# This keeps track of the history automatically across messages
+chat = client.chats.create(
     model='gemini-2.5-flash',
-    contents=user_message,
     config=types.GenerateContentConfig(
         system_instruction=system_instruction,
         tools=[check_my_bike_service_status], 
@@ -61,5 +59,28 @@ response = client.models.generate_content(
     )
 )
 
-print("=== AI Agent Response ===")
-print(response.text)
+print("==================================================")
+print(f" MotoMechanic AI Active for your {MY_BIKE.make} {MY_BIKE.model}!")
+print(" Type your questions below. Type 'quit' or 'exit' to stop.")
+print("==================================================\n")
+
+# 6. The Continuous Conversation Loop
+while True:
+    # Get message from you via the command line
+    user_input = input("You: ")
+    
+    # Break out of the loop if you want to leave
+    if user_input.lower() in ['quit', 'exit']:
+        print("\nMechanic checking out. Ride safe!")
+        break
+        
+    if not user_input.strip():
+        continue
+        
+    print("Mechanic is thinking...")
+    
+    # Send the message to the ongoing chat history session
+    response = chat.send_message(user_input)
+    
+    # Print out what the mechanic says
+    print(f"\nMotoMechanic: {response.text}\n")
