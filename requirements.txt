@@ -1,7 +1,7 @@
 streamlit
-python-dotenv
-google-genai
 pandas
-Pillow
+google-genai
 googlesearch-python
-firebase_admin
+Pillow
+python-dotenv
+firebase-admin
