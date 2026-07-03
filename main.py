@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import time
 import streamlit as st
 import pandas as pd
 from datetime import datetime
@@ -22,11 +23,13 @@ if not os.path.exists(IMAGE_DIR):
     os.makedirs(IMAGE_DIR)
 
 # =====================================================================
-# I. DATABASE ENGINE
+# I. DATABASE CORE INFRASTRUCTURE
 # =====================================================================
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
+    
+    # Vehicles core profile parameters
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS vehicles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,6 +42,7 @@ def init_db():
             is_active INTEGER DEFAULT 0
         )
     """)
+    
     cursor.execute("PRAGMA table_info(vehicles)")
     columns = [column[1] for column in cursor.fetchall()]
     if 'color' not in columns:
@@ -78,6 +82,25 @@ def init_db():
             mileage INTEGER NOT NULL,
             date_logged TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             label TEXT NOT NULL,
+            FOREIGN KEY (vehicle_id) REFERENCES vehicles (id) ON DELETE CASCADE
+        )
+    """)
+
+    # SCHEMA MIGRATION: Drop the old legacy table structure if it's missing the vehicle relationship column
+    cursor.execute("PRAGMA table_info(rag_stores)")
+    rag_columns = [col[1] for col in cursor.fetchall()]
+    if rag_columns and 'vehicle_id' not in rag_columns:
+        cursor.execute("DROP TABLE rag_stores")
+        conn.commit()
+
+    # Recreate the modernized multi-manual tracking matrix
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS rag_stores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            vehicle_id INTEGER UNIQUE NOT NULL,
+            store_name TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            date_indexed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (vehicle_id) REFERENCES vehicles (id) ON DELETE CASCADE
         )
     """)
@@ -207,6 +230,21 @@ def get_visual_inspections(vehicle_id: int) -> list:
     conn.close()
     return [dict(r) for r in rows]
 
+def get_indexed_rag_store_for_vehicle(vehicle_id: int) -> str:
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT store_name FROM rag_stores WHERE vehicle_id = ?", (vehicle_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else ""
+
+def log_indexed_rag_store_for_vehicle(vehicle_id: int, store_name: str, file_name: str):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO rag_stores (vehicle_id, store_name, file_name) VALUES (?, ?, ?)", (vehicle_id, store_name, file_name))
+    conn.commit()
+    conn.close()
+
 
 # =====================================================================
 # II. TOOLS
@@ -270,6 +308,45 @@ if st.sidebar.button("Update Odometer"):
 
 st.sidebar.divider()
 
+# DYNAMIC ROADMAP PORTAL EXPANDER
+st.sidebar.subheader("📖 Profile Shop Manual RAG")
+expected_manual_path = f"manuals/{active_bike['id']}/service_manual.pdf"
+active_rag_store = get_indexed_rag_store_for_vehicle(active_bike['id'])
+
+if not active_rag_store:
+    if os.path.exists(expected_manual_path):
+        st.sidebar.warning(f"Manual detected for target profile index {active_bike['id']} but not indexed yet.")
+        if st.sidebar.button("⚡ Index Profile Manual"):
+            with st.sidebar.spinner("Uploading separate vehicle context schema into cloud store..."):
+                try:
+                    store = client.file_search_stores.create(
+                        config={
+                            "display_name": f"manual-vehicle-id-{active_bike['id']}",
+                            "embedding_model": "models/gemini-embedding-2"
+                        }
+                    )
+                    operation = client.file_search_stores.upload_to_file_search_store(
+                        file_search_store_name=store.name,
+                        file=expected_manual_path,
+                        config={"display_name": f"Manual Bike {active_bike['id']}"}
+                    )
+                    while not operation.done:
+                        time.sleep(3)
+                        operation = client.operations.get(operation=operation)
+                        
+                    log_indexed_rag_store_for_vehicle(active_bike['id'], store.name, "service_manual.pdf")
+                    st.sidebar.success(f"Manual verified for active profile node!")
+                    st.rerun()
+                except Exception as e:
+                    st.sidebar.error(f"Ingestion crashed: {str(e)}")
+    else:
+        st.sidebar.info(f"Drop this bike's unique manual PDF inside `{expected_manual_path}` to map context index profiles.")
+else:
+    st.sidebar.success(f"🟢 Active Context: Loaded for Vehicle ID {active_bike['id']}")
+    st.sidebar.caption(f"Index Token: `{active_rag_store.split('/')[-1]}`")
+
+st.sidebar.divider()
+
 with st.sidebar.expander("⛽ Log Fuel Refueling Fillup"):
     fuel_mileage = st.number_input("Odometer reading at gas station (km):", min_value=0, value=active_bike['current_mileage'])
     fuel_liters = st.number_input("Total liters filled:", min_value=0.0, value=10.0, step=1.0)
@@ -326,24 +403,37 @@ if uploaded_file:
 
 
 # =====================================================================
-# IV. CHAT CONTROLLER
+# IV. CHAT CONTROLLER WITH FILE SEARCH INTEGRATION
 # =====================================================================
 if "chat" not in st.session_state or "current_bike_id" not in st.session_state or st.session_state.current_bike_id != active_bike['id']:
     st.session_state.current_bike_id = active_bike['id']
     
-    system_instruction = f"""You are 'MotoMechanic AI', a motorcycle service diagnostic agent. You are helping a user with a {active_bike.get('color', 'Black')} {active_bike['year']} {active_bike['make']} {active_bike['model']}.
+    system_instruction = f"""You are 'MotoMechanic AI', a professional motorcycle diagnostic service agent. You are evaluating maintenance data for a user who owns a {active_bike.get('color', 'Black')} {active_bike['year']} {active_bike['make']} {active_bike['model']}.
 
-    You have two tools:
-    1. check_my_bike_service_status
-    2. search_web_for_motorcycle_specs
+    If a File Search store is available, use it to lookup exact engineering parameters or torque values from this exact bike's specific manual.
+    Otherwise, fall back to check_my_bike_service_status or search_web_for_motorcycle_specs if required.
 
     Safety Rule: Always instruct the user to verify guidelines inside their official factory service manuals."""
+    
+    available_tools = [check_my_bike_service_status, search_web_for_motorcycle_specs]
+    
+    if active_rag_store:
+        file_search_tool = types.Tool(
+            file_search=types.FileSearch(
+                file_search_retrieval_resources=[
+                    types.FileSearchRetrievalResource(
+                        file_search_store_name=active_rag_store
+                    )
+                ]
+            )
+        )
+        available_tools.append(file_search_tool)
     
     st.session_state.chat = client.chats.create(
         model='gemini-2.5-flash',
         config=types.GenerateContentConfig(
             system_instruction=system_instruction,
-            tools=[check_my_bike_service_status, search_web_for_motorcycle_specs], 
+            tools=available_tools, 
             temperature=0.7
         )
     )
@@ -353,15 +443,13 @@ if "messages" not in st.session_state:
 
 
 # =====================================================================
-# V. MOBILE RESPONSIVE TABS LAYER
+# V. MAIN WINDOW LAYOUT
 # =====================================================================
 st.title("🤖 MotoMechanic Enterprise AI Portal")
 st.caption(f"Connected Core Service Terminal | Active Unit Target: {active_bike['year']} {active_bike['make']} {active_bike['model']}")
 
-# Use tabs to optimize screen space cleanly across mobile viewports
 tab_chat, tab_service, tab_analytics = st.tabs(["💬 Mechanic Chat", "📋 Service History", "📊 Cost Metrics"])
 
-# --- TAB 1: CHAT INTERFACE ---
 with tab_chat:
     with st.expander("🚨 Open Engine Troubleshooting Diagnostic Wizard"):
         st.write("Isolate electrical or mechanical ignition failures step-by-step:")
@@ -408,18 +496,17 @@ with tab_chat:
                         st.write(response.text)
                         st.session_state.messages.append({"role": "assistant", "text": response.text})
                     else:
-                        st.write("I've analyzed your context log details.")
-                        st.session_state.messages.append({"role": "assistant", "text": "Analyzed records."})
+                        st.write("I've evaluated your vehicle manual data mapping profile parameters.")
+                        st.session_state.messages.append({"role": "assistant", "text": "Processed details."})
 
                 except Exception as e:
                     if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                        error_msg = "⚠️ Rate limit hit. Please wait 15–20 seconds for your free tier quota to refresh before typing your next question!"
+                        error_msg = "⚠️ Rate limit hit. Please wait 15–20 seconds before resending your message!"
                     else:
-                        error_msg = "⚠️ Gemini servers are currently busy. Please try again in a few moments."
+                        error_msg = f"⚠️ Gemini experienced an error: {str(e)}"
                     st.error(error_msg)
                     st.session_state.messages.append({"role": "assistant", "text": error_msg})
 
-# --- TAB 2: MAINTENANCE SERVICE Timeline ---
 with tab_service:
     st.subheader("📋 Maintenance Service Book")
     history = get_service_history(active_bike['id'])
@@ -433,7 +520,6 @@ with tab_service:
                 if record['notes']:
                     st.caption(f"Notes: {record['notes']}")
 
-# --- TAB 3: COST ANALYTICS & IMAGES ---
 with tab_analytics:
     st.subheader("📊 Fleet Cost Analytics")
     fuel_data = get_fuel_history(active_bike['id'])
@@ -454,7 +540,6 @@ with tab_analytics:
 
     total_service_cost = sum([r['cost'] for r in history])
     
-    # Render indicators cleanly side by side
     c1, c2 = st.columns(2)
     c1.metric(label="Total Fuel Expense", value=f"${total_fuel_cost:.2f}")
     c2.metric(label="Total Maintenance Cost", value=f"${total_service_cost:.2f}")
