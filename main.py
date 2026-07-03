@@ -46,6 +46,25 @@ def log_fuel_event(vehicle_id, mileage, liters, cost):
     })
     db.reference(f'vehicles/{vehicle_id}').update({'current_mileage': mileage})
 
+def add_new_vehicle(user_id, make, model, current_mileage):
+    # This creates a unique reference for the new bike
+    new_bike_ref = db.reference(f'users/{user_id}/vehicles').push()
+    new_bike_ref.set({
+        'make': make,
+        'model': model,
+        'current_mileage': current_mileage,
+        'is_active': True # New bikes automatically become the 'active' one
+    })
+
+with st.sidebar.expander("➕ Add New Vehicle"):
+    new_make = st.text_input("Make")
+    new_model = st.text_input("Model")
+    new_odo = st.number_input("Starting Mileage", value=0)
+    if st.button("Register Bike"):
+        add_new_vehicle(user_id, new_make, new_model, new_odo)
+        st.success("Bike added! Refreshing...")
+        st.rerun()
+
 # =====================================================================
 # III. UI & MAIN INTERFACE
 # =====================================================================
