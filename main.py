@@ -52,6 +52,10 @@ def init_db():
         cursor.execute("ALTER TABLE vehicles ADD COLUMN color TEXT DEFAULT 'Black'")
     conn.commit()
 
+    # SCHEMA RESOLUTION MIGRATION: Auto-assign pre-existing legacy data arrays to Rider_Alpha
+    cursor.execute("UPDATE vehicles SET user_id = 'Rider_Alpha' WHERE user_id = 'Default_User'")
+    conn.commit()
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS service_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,46 +109,66 @@ def init_db():
             FOREIGN KEY (vehicle_id) REFERENCES vehicles (id) ON DELETE CASCADE
         )
     """)
-
-    # Verify seed entries
-    cursor.execute("SELECT COUNT(*) FROM vehicles")
-    if cursor.fetchone()[0] == 0:
-        cursor.execute("""
-            INSERT INTO vehicles (user_id, make, model, year, current_mileage, last_oil_change_mileage, color, is_active)
-            VALUES ('Rider_Alpha', 'Kawasaki', 'Ninja 250R', 2008, 45000, 40000, 'Black', 1)
-        """)
-        cursor.execute("""
-            INSERT INTO vehicles (user_id, make, model, year, current_mileage, last_oil_change_mileage, color, is_active)
-            VALUES ('Rider_Beta', 'Honda', 'CB500X', 2021, 15000, 12000, 'Red', 0)
-        """)
-        conn.commit()
-        
-        cursor.execute("INSERT INTO service_records (vehicle_id, service_type, mileage, cost, notes) VALUES (1, 'Routine Oil Change', 40000, 45.00, 'Semi-synthetic oil change.')")
-        cursor.execute("INSERT INTO fuel_logs (vehicle_id, mileage, liters, cost) VALUES (1, 44200, 10.0, 20.00)")
-        cursor.execute("INSERT INTO fuel_logs (vehicle_id, mileage, liters, cost) VALUES (1, 44500, 12.0, 24.00)")
-        cursor.execute("INSERT INTO fuel_logs (vehicle_id, mileage, liters, cost) VALUES (1, 44850, 11.5, 23.00)")
-        cursor.execute("INSERT INTO fuel_logs (vehicle_id, mileage, liters, cost) VALUES (1, 45000, 5.0, 11.00)")
     conn.commit()
     conn.close()
 
 init_db()
 
-# --- DATA MUTATION ACTIONS BOUND BY USER ACCESS ROLES ---
+# --- DYNAMIC MULTI-USER DATA UTILITIES ---
 def get_active_vehicle_for_user(user_id: str) -> dict:
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
+    
+    # Find if an active vehicle exists for this specific user profile node
     cursor.execute("SELECT * FROM vehicles WHERE user_id = ? AND is_active = 1 LIMIT 1", (user_id,))
     row = cursor.fetchone()
+    
     if not row:
+        # Fallback: check if they have any vehicle at all
         cursor.execute("SELECT * FROM vehicles WHERE user_id = ? LIMIT 1", (user_id,))
         row = cursor.fetchone()
         if row:
             cursor.execute("UPDATE vehicles SET is_active = 0 WHERE user_id = ?", (user_id,))
             cursor.execute("UPDATE vehicles SET is_active = 1 WHERE id = ?", (row['id'],))
             conn.commit()
+            cursor.execute("SELECT * FROM vehicles WHERE id = ?", (row['id'],))
+            row = cursor.fetchone()
+            
     conn.close()
-    return dict(row) if row else {"id": 1, "user_id": user_id, "make": "Kawasaki", "model": "Ninja 250R", "year": 2008, "current_mileage": 45000, "last_oil_change_mileage": 40000, "color": "Black"}
+    
+    # DYNAMIC AUTO-SEED: If the user profile has zero vehicles, create a tailored default bike for them right now
+    if not row:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE vehicles SET is_active = 0 WHERE user_id = ?", (user_id,))
+        
+        if user_id == "Rider_Beta":
+            cursor.execute("""
+                INSERT INTO vehicles (user_id, make, model, year, current_mileage, last_oil_change_mileage, color, is_active)
+                VALUES ('Rider_Beta', 'Honda', 'CB500X', 2021, 15000, 12000, 'Red', 1)
+            """)
+        elif user_id == "Guest_Mechanic":
+            cursor.execute("""
+                INSERT INTO vehicles (user_id, make, model, year, current_mileage, last_oil_change_mileage, color, is_active)
+                VALUES ('Guest_Mechanic', 'Yamaha', 'YZF-R6', 2018, 22000, 20000, 'Blue', 1)
+            """)
+        else:
+            cursor.execute("""
+                INSERT INTO vehicles (user_id, make, model, year, current_mileage, last_oil_change_mileage, color, is_active)
+                VALUES (?, 'Kawasaki', 'Ninja 250R', 2008, 45000, 40000, 'Black', 1)
+            """, (user_id,))
+            
+        conn.commit()
+        
+        # Fetch the newly generated row asset cleanly
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM vehicles WHERE user_id = ? AND is_active = 1 LIMIT 1", (user_id,))
+        conn.row_factory = sqlite3.Row
+        row = cursor.fetchone()
+        conn.close()
+        
+    return dict(row)
 
 def get_vehicles_by_user(user_id: str) -> list:
     conn = sqlite3.connect(DB_FILE)
@@ -259,7 +283,7 @@ def log_indexed_rag_store_for_vehicle(vehicle_id: int, store_name: str, file_nam
 
 
 # =====================================================================
-# II. DYNAMIC UTILITIES (SEARCH TOOLS)
+# II. TOOLS
 # =====================================================================
 def search_web_for_motorcycle_specs(query: str) -> str:
     """Searches Google for mechanical specifications, fluid capacities, or torque specs for motorcycles."""
@@ -273,33 +297,32 @@ def search_web_for_motorcycle_specs(query: str) -> str:
 
 
 # =====================================================================
-# III. Streamlit UI ENTRY & CONFIGURATION
+# III. STREAMLIT INTERFACE
 # =====================================================================
-st.set_page_config(page_title="MotoMechanic Enterprise Suite", page_icon="🏍️", layout="wide")
-
-# MODULE 10: Multi-User Profile Identity Switcher Panel
 st.sidebar.title("🔐 User Portal Gate")
 current_user = st.sidebar.selectbox("Active Operator Profile Authenticated:", ["Rider_Alpha", "Rider_Beta", "Guest_Mechanic"])
 
-# Load active context configuration rows relative to logged user state
+# Load matching vehicle context blocks
 active_bike = get_active_vehicle_for_user(current_user)
 all_bikes = get_vehicles_by_user(current_user)
 
 st.sidebar.divider()
 st.sidebar.subheader("🏢 Managed Fleet Sub-Garage")
 
-if not all_bikes:
-    st.sidebar.info("No vehicles cataloged for this profile token node.")
-    bike_options = {}
-else:
-    bike_options = {f"{b['year']} {b['make']} {b['model']}": b['id'] for b in all_bikes}
-    selected_bike_name = st.sidebar.selectbox("Select Target Vehicle:", list(bike_options.keys()))
+bike_options = {f"{b['year']} {b['make']} {b['model']}": b['id'] for b in all_bikes}
+
+current_index = 0
+active_bike_string = f"{active_bike['year']} {active_bike['make']} {active_bike['model']}"
+if active_bike_string in bike_options:
+    current_index = list(bike_options.keys()).index(active_bike_string)
     
-    if bike_options[selected_bike_name] != active_bike['id']:
-        set_active_vehicle_for_user(current_user, bike_options[selected_bike_name])
-        if "chat" in st.session_state:
-            del st.session_state.chat
-        st.rerun()
+selected_bike_name = st.sidebar.selectbox("Select Target Vehicle:", list(bike_options.keys()), index=current_index)
+
+if bike_options[selected_bike_name] != active_bike['id']:
+    set_active_vehicle_for_user(current_user, bike_options[selected_bike_name])
+    if "chat" in st.session_state:
+        del st.session_state.chat
+    st.rerun()
 
 st.sidebar.divider()
 st.sidebar.markdown(f"### Target Unit Focus: **{active_bike['year']} {active_bike['make']} {active_bike['model']}**")
@@ -315,7 +338,45 @@ if st.sidebar.button("Update Odometer"):
 
 st.sidebar.divider()
 
-# Log entries expansion widgets
+# Profile Manual expander
+st.sidebar.subheader("📖 Profile Shop Manual RAG")
+expected_manual_path = f"manuals/{active_bike['id']}/service_manual.pdf"
+active_rag_store = get_indexed_rag_store_for_vehicle(active_bike['id'])
+
+if not active_rag_store:
+    if os.path.exists(expected_manual_path):
+        st.sidebar.warning(f"Manual detected for profile index {active_bike['id']} but not indexed yet.")
+        if st.sidebar.button("⚡ Index Profile Manual"):
+            with st.sidebar.spinner("Uploading separate vehicle context schema into cloud store..."):
+                try:
+                    store = client.file_search_stores.create(
+                        config={
+                            "display_name": f"manual-vehicle-id-{active_bike['id']}",
+                            "embedding_model": "models/gemini-embedding-2"
+                        }
+                    )
+                    operation = client.file_search_stores.upload_to_file_search_store(
+                        file_search_store_name=store.name,
+                        file=expected_manual_path,
+                        config={"display_name": f"Manual Bike {active_bike['id']}"}
+                    )
+                    while not operation.done:
+                        time.sleep(3)
+                        operation = client.operations.get(operation=operation)
+                        
+                    log_indexed_rag_store_for_vehicle(active_bike['id'], store.name, "service_manual.pdf")
+                    st.sidebar.success(f"Manual verified for active profile node!")
+                    st.rerun()
+                except Exception as e:
+                    st.sidebar.error(f"Ingestion crashed: {str(e)}")
+    else:
+        st.sidebar.info(f"Drop this bike's unique manual PDF inside `{expected_manual_path}` to map context index profiles.")
+else:
+    st.sidebar.success(f"🟢 Active Context: Loaded for Vehicle ID {active_bike['id']}")
+    st.sidebar.caption(f"Index Token: `{active_rag_store.split('/')[-1]}`")
+
+st.sidebar.divider()
+
 with st.sidebar.expander("⛽ Log Refueling Event"):
     fuel_mileage = st.number_input("Station Odometer Reading (km):", min_value=0, value=active_bike['current_mileage'])
     fuel_liters = st.number_input("Liters Fueled:", min_value=0.0, value=10.0, step=1.0)
@@ -374,8 +435,6 @@ if uploaded_file:
 # =====================================================================
 # IV. CORE CHAT SESSION SETUP
 # =====================================================================
-active_rag_store = get_indexed_rag_store_for_vehicle(active_bike['id'])
-
 if "chat" not in st.session_state or "current_bike_id" not in st.session_state or st.session_state.current_bike_id != active_bike['id']:
     st.session_state.current_bike_id = active_bike['id']
     
@@ -399,16 +458,16 @@ if "messages" not in st.session_state:
 
 
 # =====================================================================
-# V. MAIN RENDER LAYER (MOBILE-OPTIMIZED INTERACTION TABS)
+# V. MAIN RENDER LAYER
 # =====================================================================
-st.title("🏍️ MotoMechanic Enterprise AI Ecosystem")
+st.title("季度 MotoMechanic Enterprise AI Ecosystem")
 st.caption(f"Tenant Account ID: `{current_user}` | Active Focus Node: {active_bike['year']} {active_bike['make']} {active_bike['model']}")
 
 tab_chat, tab_service, tab_analytics, tab_predictive, tab_marketplace = st.tabs([
     "💬 Mechanic Chat", "📋 Service Logs", "📊 Fleet Analytics", "🔮 ML Wear Forecasts", "🛒 Parts Marketplace"
 ])
 
-# --- TAB 1: AI DIALOGUE PORTAL ---
+# --- TAB 1: AI CHAT ---
 with tab_chat:
     with st.expander("🚨 Open Engine Troubleshooting Diagnostic Wizard"):
         st.write("Isolate electrical or mechanical ignition failures step-by-step:")
@@ -455,7 +514,7 @@ with tab_chat:
                 except Exception as e:
                     st.error(f"Ecosystem pipeline alert: {str(e)}")
 
-# --- TAB 2: SERVICE TIMELINE HISTORIES ---
+# --- TAB 2: SERVICE TIMELINE ---
 with tab_service:
     st.subheader("📋 Relational Log Timeline History")
     history = get_service_history(active_bike['id'])
@@ -470,7 +529,7 @@ with tab_service:
                 if record['notes']:
                     st.info(f"**Operator/Mechanic Notes:** {record['notes']}")
 
-# --- TAB 3: CONSUMPTION ANALYTICS MATRICES ---
+# --- TAB 3: FLEET ANALYTICS ---
 with tab_analytics:
     st.subheader("📊 Fleet Diagnostic Expense Matrices")
     fuel_data = get_fuel_history(active_bike['id'])
@@ -495,15 +554,14 @@ with tab_analytics:
     c2.metric("Aggregated Service Invoices", f"${total_service_cost:.2f}")
     
     st.markdown("**Operational Budget Allocation Distribution**")
-    expense_df = pd.DataFrame({"Category": ["Refueling Expense", "Maintenance Operation"], "Expended Capital ($)": [total_fuel_cost, total_service_cost]})
+    expense_df = pd.DataFrame({"Category": ["Refueling Expense", "Maintenance Operation"], "Total Expended ($)": [total_fuel_cost, total_service_cost]})
     st.bar_chart(expense_df.set_index("Category"))
 
-# --- TAB 4: MODULE 8 - ML DEGRADATION FORECASTER ---
+# --- TAB 4: ML WEAR FORECASTS ---
 with tab_predictive:
     st.subheader("🔮 Predictive Machine Learning Wear Forecasts")
     st.write("Tracking telemetry patterns against structural component shelf-life indexes:")
     
-    # Engine Lubricant Breakdown tracking calculation
     mileage_since_oil = active_bike["current_mileage"] - active_bike["last_oil_change_mileage"]
     oil_health_factor = max(0, int(((5000 - mileage_since_oil) / 5000) * 100))
     
@@ -520,7 +578,6 @@ with tab_predictive:
     st.divider()
     st.markdown("### **Structural Wear Forecasting Table Metrics**")
     
-    # Compile forecasting logic calculations mapped relative to the current vehicle odometer telemetry
     current_odo = active_bike["current_mileage"]
     prediction_matrix = [
         {"Component Target": "Drive Chain Tension/Slack Check", "Last Event": f"{current_odo - (current_odo % 1000)} km", "Predicted Next Service": f"{current_odo - (current_odo % 1000) + 1000} km", "Risk Level Alert": "Low"},
@@ -530,7 +587,7 @@ with tab_predictive:
     ]
     st.table(pd.DataFrame(prediction_matrix))
 
-# --- TAB 5: MODULE 9 - MARKETPLACE COMPONENT LOOKUP ---
+# --- TAB 5: COMPONENT MARKETPLACE ---
 with tab_marketplace:
     st.subheader("🛒 Automated Component Marketplace Sourcing")
     st.write("Cross-referencing parts inventories relative to target profiles index matching arrays:")
@@ -545,7 +602,6 @@ with tab_marketplace:
     if st.button("Query Marketplace Channels"):
         with st.spinner("Scraping supply distribution channels..."):
             try:
-                # Execute automated parsing query over available live search tools
                 results = []
                 for url in search(search_query, num_results=4):
                     results.append(url)
