@@ -3,4 +3,4 @@ python-dotenv
 google-genai
 pandas
 Pillow
-google-search
+googlesearch-python
