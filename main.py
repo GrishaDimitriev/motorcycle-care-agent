@@ -173,10 +173,32 @@ def add_new_vehicle_for_user(user_id: str, make: str, model: str, year: int, mil
     conn.commit()
     conn.close()
 
+# 1. Ensure these imports are at the VERY TOP
+import firebase_admin
+from firebase_admin import credentials, db
+
+# 2. Ensure this runs once at the module level
+if not firebase_admin._apps:
+    cred = credentials.Certificate(json.loads(st.secrets["FIREBASE_CREDENTIALS"]))
+    firebase_admin.initialize_app(cred, {
+        'databaseURL': 'https://test-mode-a344c-default-rtdb.asia-southeast1.firebasedatabase.app/'
+    })
+
+# 3. Use this updated function
 def update_mileage_in_db(vehicle_id, new_mileage):
-    # We need to find which user owns this bike to construct the correct path
-    # 'users' is the root node
-    users = db.reference('users').get()
+    try:
+        # Explicitly reference the initialized database
+        root = db.reference('users')
+        users = root.get()
+        
+        if users:
+            for user_id, user_data in users.items():
+                if 'vehicles' in user_data and vehicle_id in user_data['vehicles']:
+                    db.reference(f'users/{user_id}/vehicles/{vehicle_id}').update({'current_mileage': int(new_mileage)})
+                    return True
+    except Exception as e:
+        st.error(f"Database error: {e}")
+    return False
     
     if users:
         for user_id, user_data in users.items():
