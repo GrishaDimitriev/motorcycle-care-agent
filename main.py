@@ -1,31 +1,32 @@
 import os
 import json
+import streamlit as st
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
 from googlesearch import search
 
-# Load the API key from your hidden .env file
+# Load environment variables
 load_dotenv()
 
-# 1. Initialize the Gemini Client
+# Initialize the Gemini Client
 client = genai.Client()
 
-# Path to our local data storage file
 PROFILE_FILE = "bike_profile.json"
 
-# Helper Function: Load the bike profile from the JSON file
+# Helper functions for JSON storage
 def load_bike_profile() -> dict:
+    if not os.path.exists(PROFILE_FILE):
+        # Default fallback structure
+        return {"make": "Generic", "model": "Bike", "year": 2020, "current_mileage": 0, "last_oil_change_mileage": 0}
     with open(PROFILE_FILE, "r") as f:
         return json.load(f)
 
-# Helper Function: Save the updated bike profile back to the JSON file
 def save_bike_profile(data: dict):
     with open(PROFILE_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
-# 2. Tool 1: The maintenance tracker tool
+# Tool 1: Maintenance Status
 def check_my_bike_service_status() -> str:
     """Checks the maintenance and service schedule logs for the rider's active motorcycle profile."""
     bike = load_bike_profile()
@@ -36,27 +37,9 @@ def check_my_bike_service_status() -> str:
         return f"System Log: The {bike['make']} is overdue for an oil change by {abs(km_remaining)} km."
     return f"System Log: The oil is currently fine. {km_remaining} km left until the next change."
 
-# 3. Tool 2: The odometer updating tool
-def update_bike_odometer(new_mileage: int) -> str:
-    """Updates the motorcycle's current odometer mileage record when the rider goes for rides."""
-    print(f"\n[Agent Tool] Updating odometer log to: {new_mileage} km...")
-    try:
-        bike = load_bike_profile()
-        
-        # Validation to prevent lowering odometer values
-        if new_mileage < bike["current_mileage"]:
-            return f"Error: The new mileage ({new_mileage} km) cannot be lower than the current mileage ({bike['current_mileage']} km)."
-            
-        bike["current_mileage"] = new_mileage
-        save_bike_profile(bike)
-        return f"System Log: Odometer successfully updated to {new_mileage} km."
-    except Exception as e:
-        return f"Failed to update odometer record due to error: {str(e)}"
-
-# 4. Tool 3: Custom Python Web Search tool
+# Tool 2: Web Search
 def search_web_for_motorcycle_specs(query: str) -> str:
     """Searches Google for mechanical specifications, fluid capacities, or torque specs for motorcycles."""
-    print(f"\n[Agent Tool] Running Google Search for: '{query}'...")
     try:
         results = []
         for url in search(query, num_results=3):
@@ -65,47 +48,72 @@ def search_web_for_motorcycle_specs(query: str) -> str:
     except Exception as e:
         return f"Search failed: {str(e)}"
 
-# 5. Set up Dynamic System Instructions
+# --- STREAMLIT WEB INTERFACE CONFIG ---
+st.set_page_config(page_title="MotoMechanic AI Portal", page_icon="🏍️", layout="wide")
+
+# Load current bike configuration
 bike_data = load_bike_profile()
-system_instruction = f"""
-You are 'MotoMechanic AI', an expert motorcycle technician. 
-You are talking to a rider who owns a {bike_data['year']} {bike_data['make']} {bike_data['model']}.
 
-You have three custom tools available:
-1. `check_my_bike_service_status`: Use this to look at the user's current mileage calculations.
-2. `update_bike_odometer`: Use this immediately if the user tells you they went for a ride, completed a trip, or want to update their odometer mileage.
-3. `search_web_for_motorcycle_specs`: Use this if the user asks for bike details requiring online lookups.
+# 1. Create a Sidebar Dashboard
+st.sidebar.title("🏍️ Garage Profile")
+st.sidebar.markdown(f"### **{bike_data['year']} {bike_data['make']} {bike_data['model']}**")
+st.sidebar.divider()
 
-Safety Rule: Always tell the user to check their factory service manual for structural engine or brake repairs.
-"""
+# Interactive Odometer Updater Widget right in the sidebar
+st.sidebar.markdown(f"**Current Odometer:** `{bike_data['current_mileage']} km`")
+st.sidebar.markdown(f"**Last Oil Change:** `{bike_data['last_oil_change_mileage']} km`")
 
-# 6. Initialize the Chat Session with all three tools
-chat = client.chats.create(
-    model='gemini-2.5-flash',
-    config=types.GenerateContentConfig(
-        system_instruction=system_instruction,
-        tools=[check_my_bike_service_status, update_bike_odometer, search_web_for_motorcycle_specs], 
-        temperature=0.7
+st.sidebar.subheader("Update Mileage Log")
+new_mileage = st.sidebar.number_input("Enter new odometer reading (km):", min_value=bike_data['current_mileage'], value=bike_data['current_mileage'])
+if st.sidebar.button("Save New Mileage"):
+    bike_data['current_mileage'] = new_mileage
+    save_bike_profile(bike_data)
+    st.sidebar.success(f"Saved! Odometer logged at {new_mileage} km.")
+    st.rerun()
+
+# 2. Setup Persistent Chat Session Memory across UI reloads
+if "chat" not in st.session_state:
+    system_instruction = f"""
+    You are 'MotoMechanic AI', an expert motorcycle technician. 
+    You are talking to a rider who owns a {bike_data['year']} {bike_data['make']} {bike_data['model']}.
+
+    You have two custom tools available:
+    1. `check_my_bike_service_status`: Use this to check the user's current mileage logs.
+    2. `search_web_for_motorcycle_specs`: Use this if the user asks for specs requiring online lookups.
+
+    Safety Rule: Always tell the user to check their factory service manual for structural engine or brake repairs.
+    """
+    st.session_state.chat = client.chats.create(
+        model='gemini-2.5-flash',
+        config=types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            tools=[check_my_bike_service_status, search_web_for_motorcycle_specs], 
+            temperature=0.7
+        )
     )
-)
 
-print("==================================================")
-print(f" MotoMechanic AI (Dynamic Memory Active) for {bike_data['make']} {bike_data['model']}!")
-print(" Type your questions below. Type 'quit' or 'exit' to stop.")
-print("==================================================\n")
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-# 7. The Continuous Conversation Loop
-while True:
-    user_input = input("You: ")
-    
-    if user_input.lower() in ['quit', 'exit']:
-        print("\nMechanic checking out. Ride safe!")
-        break
-        
-    if not user_input.strip():
-        continue
-        
-    print("Mechanic is thinking...")
-    
-    response = chat.send_message(user_input)
-    print(f"\nMotoMechanic: {response.text}\n")
+# Main App Header Text
+st.title("🤖 MotoMechanic AI Assistant")
+st.caption("Ask maintenance questions, check service schedules, or request torque specs live!")
+
+# Display current chat history on screen
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.write(msg["text"])
+
+# Handle new inputs from user chat input box
+if user_prompt := st.chat_input("Type your message here..."):
+    # Render user message
+    with st.chat_message("user"):
+        st.write(user_prompt)
+    st.session_state.messages.append({"role": "user", "text": user_prompt})
+
+    # Render assistant response with a spinner
+    with st.chat_message("assistant"):
+        with st.spinner("Mechanic is checking specifications..."):
+            response = st.session_state.chat.send_message(user_prompt)
+            st.write(response.text)
+    st.session_state.messages.append({"role": "assistant", "text": response.text})
