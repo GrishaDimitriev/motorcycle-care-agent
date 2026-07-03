@@ -173,12 +173,21 @@ def add_new_vehicle_for_user(user_id: str, make: str, model: str, year: int, mil
     conn.commit()
     conn.close()
 
-def update_mileage_in_db(vehicle_id: int, new_mileage: int):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE vehicles SET current_mileage = ? WHERE id = ?", (new_mileage, vehicle_id))
-    conn.commit()
-    conn.close()
+def update_mileage_in_db(vehicle_id, new_mileage):
+    # We need to find which user owns this bike to construct the correct path
+    # 'users' is the root node
+    users = db.reference('users').get()
+    
+    if users:
+        for user_id, user_data in users.items():
+            if 'vehicles' in user_data:
+                # Check if this vehicle exists under this user
+                if vehicle_id in user_data['vehicles']:
+                    # Build the exact path: users/Rider_Alpha/vehicles/-OwaPM...
+                    path = f'users/{user_id}/vehicles/{vehicle_id}'
+                    db.reference(path).update({'current_mileage': int(new_mileage)})
+                    return True # Successfully updated
+    return False
 
 def update_vehicle_details(vehicle_id: int, make: str, model: str, year: int, color: str):
     conn = sqlite3.connect(DB_FILE)
