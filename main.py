@@ -1,33 +1,31 @@
-# --- IMPORTS (Ensure these are at the very top) ---
 import os
-import sqlite3
-import time
 import streamlit as st
 import pandas as pd
+import json
+import time
 from datetime import datetime
+# REMOVE: from dotenv import load_dotenv
+# REMOVE: load_dotenv()
+
+# Keep these
+from google import genai
+from google.genai import types
+from googlesearch import search
+from PIL import Image
 import firebase_admin
 from firebase_admin import credentials, db
-import json
 
-# --- FIREBASE INIT (MUST BE AT THE TOP) ---
+# Initialize the Gemini Client using secrets
+client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+
+# Initialize Firebase using secrets
 if not firebase_admin._apps:
-    try:
-        if "FIREBASE_CREDENTIALS" in st.secrets:
-            # Use Streamlit Cloud Secrets
-            cred_dict = json.loads(st.secrets["FIREBASE_CREDENTIALS"])
-        else:
-            # Fallback to local file for development
-            with open("firebase_key.json", "r") as f:
-                cred_dict = json.load(f)
-        
-        cred = credentials.Certificate(cred_dict)
-        firebase_admin.initialize_app(cred, {
-            'databaseURL': 'https://test-mode-a344c-default-rtdb.asia-southeast1.firebasedatabase.app/'
-        })
-    except Exception as e:
-        st.error(f"Failed to initialize Firebase: {e}")
-# Load environment variables
-load_dotenv()
+    # This automatically pulls from your Streamlit Cloud "Secrets" dashboard
+    cred_dict = json.loads(st.secrets["FIREBASE_CREDENTIALS"])
+    cred = credentials.Certificate(cred_dict)
+    firebase_admin.initialize_app(cred, {
+        'databaseURL': 'https://test-mode-a344c-default-rtdb.asia-southeast1.firebasedatabase.app/'
+    })
 
 # Initialize the Gemini Client
 client = genai.Client()
