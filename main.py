@@ -258,7 +258,6 @@ def log_indexed_rag_store_for_vehicle(vehicle_id: int, store_name: str, file_nam
     conn.close()
 
 def search_web_for_motorcycle_specs(query: str) -> str:
-    """Searches Google for mechanical specifications, fluid capacities, or torque specs for motorcycles."""
     try:
         results = []
         for url in search(query, num_results=3):
@@ -267,29 +266,24 @@ def search_web_for_motorcycle_specs(query: str) -> str:
     except Exception as e:
         return f"Search failed due to an error: {str(e)}"
 
-
 # =====================================================================
 # II. STREAMLIT GLOBAL GOOGLE MATERIAL DESIGN INJECTION (CSS OVERRIDES)
 # =====================================================================
-# Clean, crisp layout structure inspired by standard desktop workspace templates
 st.markdown("""
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
         
-        /* Global Reset to Clean Google Light Theme Canvas */
         html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
             background-color: #F8F9FA !important;
             color: #202124 !important;
         }
         
-        /* Sidebar container layout overrides - Soft Clean Gray */
         [data-testid="stSidebar"], [data-testid="stSidebarUserContent"] {
             background-color: #FFFFFF !important;
             border-right: 1px solid #E8EAED !important;
         }
         
-        /* Force high contrast dark charcoal text inside white sidebar elements */
         [data-testid="stSidebar"] p, [data-testid="stSidebar"] label, [data-testid="stSidebar"] span {
             color: #3C4043 !important;
             font-weight: 500 !important;
@@ -301,7 +295,6 @@ st.markdown("""
             color: #202124 !important;
         }
         
-        /* Modern Material Design Elevation Cards replacing dark boxes */
         div[data-testid="stVerticalBlockBorderContainer"] {
             background-color: #FFFFFF !important;
             border: 1px solid #E8EAED !important;
@@ -310,7 +303,6 @@ st.markdown("""
             box-shadow: 0 1px 2px 0 rgba(60,64,67,0.3), 0 1px 3px 1px rgba(60,64,67,0.15) !important;
         }
         
-        /* Google Telemetry Badge */
         .telemetry-badge {
             background-color: #F1F3F4 !important;
             border: 1px solid #E8EAED !important;
@@ -324,7 +316,6 @@ st.markdown("""
             margin: 8px 0;
         }
         
-        /* Navigation Tabs formatting logic layout updates - Clean Google Style */
         button[data-baseweb="tab"] {
             font-weight: 500 !important;
             font-size: 14px !important;
@@ -339,7 +330,6 @@ st.markdown("""
             border-bottom-color: #1A73E8 !important;
         }
         
-        /* Clean Google Blue Primary Action Buttons */
         div.stButton > button {
             background: #1A73E8 !important;
             color: #FFFFFF !important;
@@ -355,7 +345,6 @@ st.markdown("""
             box-shadow: 0 1px 3px 0 rgba(60,64,67,0.3), 0 4px 8px 3px rgba(60,64,67,0.15) !important;
         }
         
-        /* Target dropdown/number inputs styling compatibility layer */
         div[data-baseweb="select"] > div, div[data-testid="stNumberInput"] input {
             background-color: #FFFFFF !important;
             color: #202124 !important;
@@ -363,7 +352,6 @@ st.markdown("""
             border-radius: 4px !important;
         }
         
-        /* Text input fields background fix for consistency */
         input, select, textarea {
             color: #202124 !important;
         }
@@ -400,7 +388,6 @@ if bike_options[selected_bike_name] != active_bike['id']:
 st.sidebar.divider()
 st.sidebar.markdown(f"### 🏍️ Active Unit: **{active_bike['make']} {active_bike['model']}**")
 
-# High-visibility Material Badges
 st.sidebar.markdown(f"<div class='telemetry-badge'>Color Specification: {active_bike.get('color', 'Black').title()}</div>", unsafe_allow_html=True)
 st.sidebar.markdown(f"<div class='telemetry-badge'>Odometer Track: {active_bike['current_mileage']} km</div>", unsafe_allow_html=True)
 st.sidebar.markdown(f"<div class='telemetry-badge'>Lubricant Interval Age: {active_bike['current_mileage'] - active_bike['last_oil_change_mileage']} km</div>", unsafe_allow_html=True)
@@ -517,7 +504,7 @@ if "chat" not in st.session_state or "current_bike_id" not in st.session_state o
         available_tools.append(file_search_tool)
     
     st.session_state.chat = client.chats.create(
-        model='gemini-2.5-flash',
+        model='gemini-2.0-flash',
         config=types.GenerateContentConfig(system_instruction=system_instruction, tools=available_tools, temperature=0.7)
     )
 
