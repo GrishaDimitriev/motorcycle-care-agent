@@ -4,3 +4,4 @@ google-genai
 pandas
 Pillow
 googlesearch-python
+firebase_admin
