@@ -4,10 +4,6 @@ import pandas as pd
 import json
 import time
 from datetime import datetime
-# REMOVE: from dotenv import load_dotenv
-# REMOVE: load_dotenv()
-
-# Keep these
 from google import genai
 from google.genai import types
 from googlesearch import search
@@ -15,295 +11,85 @@ from PIL import Image
 import firebase_admin
 from firebase_admin import credentials, db
 
-# Initialize the Gemini Client using secrets
-client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-
-# Initialize Firebase using secrets
+# --- I. INITIALIZATION ---
 if not firebase_admin._apps:
-    # This automatically pulls from your Streamlit Cloud "Secrets" dashboard
+    # Use Streamlit Secrets for production
     cred_dict = json.loads(st.secrets["FIREBASE_CREDENTIALS"])
     cred = credentials.Certificate(cred_dict)
     firebase_admin.initialize_app(cred, {
         'databaseURL': 'https://test-mode-a344c-default-rtdb.asia-southeast1.firebasedatabase.app/'
     })
 
-# Initialize the Gemini Client
-client = genai.Client()
-
-DB_FILE = "garage.db"
+client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 IMAGE_DIR = "static/inspection_images"
+if not os.path.exists(IMAGE_DIR): os.makedirs(IMAGE_DIR)
 
-if not os.path.exists(IMAGE_DIR):
-    os.makedirs(IMAGE_DIR)
+# --- II. FIREBASE MAPPED ENGINE (Replaces all SQLite functions) ---
+def get_active_vehicle_for_user(user_id):
+    vehicles = db.reference(f'users/{user_id}/vehicles').get()
+    if vehicles:
+        for vid, vdata in vehicles.items():
+            if vdata.get('is_active'):
+                vdata['id'] = vid
+                return vdata
+    return {'id': 'default', 'make': 'Kawasaki', 'model': 'Ninja 250R', 'year': 2008, 'current_mileage': 45000, 'last_oil_change_mileage': 40000, 'color': 'Black'}
 
-# =====================================================================
-# I. PRODUCTION CORE DATABASE ENGINE
-# =====================================================================
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS vehicles (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT DEFAULT 'Default_User',
-            make TEXT NOT NULL,
-            model TEXT NOT NULL,
-            year INTEGER NOT NULL,
-            current_mileage INTEGER NOT NULL,
-            last_oil_change_mileage INTEGER NOT NULL,
-            color TEXT DEFAULT 'Black',
-            is_active INTEGER DEFAULT 0
-        )
-    """)
-    
-    cursor.execute("PRAGMA table_info(vehicles)")
-    columns = [column[1] for column in cursor.fetchall()]
-    if 'user_id' not in columns:
-        cursor.execute("ALTER TABLE vehicles ADD COLUMN user_id TEXT DEFAULT 'Default_User'")
-    if 'color' not in columns:
-        cursor.execute("ALTER TABLE vehicles ADD COLUMN color TEXT DEFAULT 'Black'")
-    conn.commit()
+def get_vehicles_by_user(user_id):
+    vehicles = db.reference(f'users/{user_id}/vehicles').get()
+    return [{'id': vid, **vdata} for vid, vdata in vehicles.items()] if vehicles else []
 
-    cursor.execute("UPDATE vehicles SET user_id = 'Rider_Alpha' WHERE user_id = 'Default_User'")
-    conn.commit()
+def set_active_vehicle_for_user(user_id, vehicle_id):
+    vehicles = db.reference(f'users/{user_id}/vehicles').get()
+    if vehicles:
+        for vid in vehicles: db.reference(f'users/{user_id}/vehicles/{vid}').update({'is_active': 0})
+        db.reference(f'users/{user_id}/vehicles/{vehicle_id}').update({'is_active': 1})
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS service_records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            vehicle_id INTEGER NOT NULL,
-            service_type TEXT NOT NULL,
-            mileage INTEGER NOT NULL,
-            date_logged TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            cost REAL DEFAULT 0.0,
-            notes TEXT,
-            FOREIGN KEY (vehicle_id) REFERENCES vehicles (id) ON DELETE CASCADE
-        )
-    """)
+def add_new_vehicle_for_user(user_id, make, model, year, mileage, last_oil, color):
+    db.reference(f'users/{user_id}/vehicles').push({'make': make, 'model': model, 'year': year, 'current_mileage': mileage, 'last_oil_change_mileage': last_oil, 'color': color, 'is_active': 1})
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS fuel_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            vehicle_id INTEGER NOT NULL,
-            mileage INTEGER NOT NULL,
-            liters REAL NOT NULL,
-            cost REAL NOT NULL,
-            date_logged TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (vehicle_id) REFERENCES vehicles (id) ON DELETE CASCADE
-        )
-    """)
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS visual_inspections (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            vehicle_id INTEGER NOT NULL,
-            file_path TEXT NOT NULL,
-            mileage INTEGER NOT NULL,
-            date_logged TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            label TEXT NOT NULL,
-            FOREIGN KEY (vehicle_id) REFERENCES vehicles (id) ON DELETE CASCADE
-        )
-    """)
-
-    cursor.execute("PRAGMA table_info(rag_stores)")
-    rag_columns = [col[1] for col in cursor.fetchall()]
-    if rag_columns and 'vehicle_id' not in rag_columns:
-        cursor.execute("DROP TABLE rag_stores")
-        conn.commit()
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS rag_stores (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            vehicle_id INTEGER UNIQUE NOT NULL,
-            store_name TEXT NOT NULL,
-            file_name TEXT NOT NULL,
-            date_indexed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (vehicle_id) REFERENCES vehicles (id) ON DELETE CASCADE
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# --- DATA ACTIONS ---
-def get_active_vehicle_for_user(user_id: str) -> dict:
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM vehicles WHERE user_id = ? AND is_active = 1 LIMIT 1", (user_id,))
-    row = cursor.fetchone()
-    if not row:
-        cursor.execute("SELECT * FROM vehicles WHERE user_id = ? LIMIT 1", (user_id,))
-        row = cursor.fetchone()
-        if row:
-            cursor.execute("UPDATE vehicles SET is_active = 0 WHERE user_id = ?", (user_id,))
-            cursor.execute("UPDATE vehicles SET is_active = 1 WHERE id = ?", (row['id'],))
-            conn.commit()
-            cursor.execute("SELECT * FROM vehicles WHERE id = ?", (row['id'],))
-            row = cursor.fetchone()
-    conn.close()
-    
-    if not row:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE vehicles SET is_active = 0 WHERE user_id = ?", (user_id,))
-        if user_id == "Rider_Beta":
-            cursor.execute("INSERT INTO vehicles (user_id, make, model, year, current_mileage, last_oil_change_mileage, color, is_active) VALUES ('Rider_Beta', 'Honda', 'CB500X', 2021, 15000, 12000, 'Red', 1)")
-        elif user_id == "Guest_Mechanic":
-            cursor.execute("INSERT INTO vehicles (user_id, make, model, year, current_mileage, last_oil_change_mileage, color, is_active) VALUES ('Guest_Mechanic', 'Yamaha', 'YZF-R6', 2018, 22000, 20000, 'Blue', 1)")
-        else:
-            cursor.execute("INSERT INTO vehicles (user_id, make, model, year, current_mileage, last_oil_change_mileage, color, is_active) VALUES ('Rider_Alpha', 'Kawasaki', 'Ninja 250R', 2008, 45000, 40000, 'Black', 1)")
-        conn.commit()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM vehicles WHERE user_id = ? AND is_active = 1 LIMIT 1", (user_id,))
-        conn.row_factory = sqlite3.Row
-        row = cursor.fetchone()
-        conn.close()
-    return dict(row)
-
-def get_vehicles_by_user(user_id: str) -> list:
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM vehicles WHERE user_id = ?", (user_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-def set_active_vehicle_for_user(user_id: str, vehicle_id: int):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE vehicles SET is_active = 0 WHERE user_id = ?", (user_id,))
-    cursor.execute("UPDATE vehicles SET is_active = 1 WHERE user_id = ? AND id = ?", (user_id, vehicle_id))
-    conn.commit()
-    conn.close()
-
-def add_new_vehicle_for_user(user_id: str, make: str, model: str, year: int, mileage: int, last_oil: int, color: str):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE vehicles SET is_active = 0 WHERE user_id = ?", (user_id,))
-    cursor.execute("INSERT INTO vehicles (user_id, make, model, year, current_mileage, last_oil_change_mileage, color, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, 1)", (user_id, make, model, year, mileage, last_oil, color))
-    conn.commit()
-    conn.close()
-
-# 1. Ensure these imports are at the VERY TOP
-import firebase_admin
-from firebase_admin import credentials, db
-
-# 2. Ensure this runs once at the module level
-if not firebase_admin._apps:
-    cred = credentials.Certificate(json.loads(st.secrets["FIREBASE_CREDENTIALS"]))
-    firebase_admin.initialize_app(cred, {
-        'databaseURL': 'https://test-mode-a344c-default-rtdb.asia-southeast1.firebasedatabase.app/'
-    })
-
-# 3. Use this updated function
-# --- UPDATED DATABASE FUNCTION ---
 def update_mileage_in_db(vehicle_id, new_mileage):
-    try:
-        # Access the user node directly to find the vehicle
-        users_ref = db.reference('users')
-        users = users_ref.get()
-        
-        if users:
-            for user_id, user_data in users.items():
-                if 'vehicles' in user_data and vehicle_id in user_data['vehicles']:
-                    # Update path: users/{user_id}/vehicles/{vehicle_id}
-                    db.reference(f'users/{user_id}/vehicles/{vehicle_id}').update({
-                        'current_mileage': int(new_mileage)
-                    })
-                    return True
-    except Exception as e:
-        st.error(f"Database update failed: {e}")
-    return False
+    users = db.reference('users').get()
+    for uid, data in users.items():
+        if 'vehicles' in data and vehicle_id in data['vehicles']:
+            db.reference(f'users/{uid}/vehicles/{vehicle_id}').update({'current_mileage': int(new_mileage)})
 
-def update_vehicle_details(vehicle_id: int, make: str, model: str, year: int, color: str):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE vehicles SET make = ?, model = ?, year = ?, color = ? WHERE id = ?", (make, model, year, color, vehicle_id))
-    conn.commit()
-    conn.close()
+def log_service_event(vehicle_id, service_type, mileage, cost, notes):
+    db.reference(f'logs/{vehicle_id}/service').push({'service_type': service_type, 'mileage': mileage, 'cost': cost, 'notes': notes, 'date_logged': datetime.now().isoformat()})
 
-def log_service_event(vehicle_id: int, service_type: str, mileage: int, cost: float, notes: str):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO service_records (vehicle_id, service_type, mileage, cost, notes) VALUES (?, ?, ?, ?, ?)", (vehicle_id, service_type, mileage, cost, notes))
-    if "oil" in service_type.lower():
-        cursor.execute("UPDATE vehicles SET last_oil_change_mileage = ? WHERE id = ?", (mileage, vehicle_id))
-    conn.commit()
-    conn.close()
+def get_service_history(vehicle_id):
+    logs = db.reference(f'logs/{vehicle_id}/service').get()
+    return list(logs.values()) if logs else []
 
-def get_service_history(vehicle_id: int) -> list:
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM service_records WHERE vehicle_id = ? ORDER BY mileage DESC", (vehicle_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+def log_fuel_event(vehicle_id, mileage, liters, cost):
+    db.reference(f'logs/{vehicle_id}/fuel').push({'mileage': mileage, 'liters': liters, 'cost': cost, 'date_logged': datetime.now().isoformat()})
+    update_mileage_in_db(vehicle_id, mileage)
 
-def log_fuel_event(vehicle_id: int, mileage: int, liters: float, cost: float):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO fuel_logs (vehicle_id, mileage, liters, cost) VALUES (?, ?, ?, ?)", (vehicle_id, mileage, liters, cost))
-    cursor.execute("SELECT current_mileage FROM vehicles WHERE id = ?", (vehicle_id,))
-    current_odo = cursor.fetchone()[0]
-    if mileage > current_odo:
-        cursor.execute("UPDATE vehicles SET current_mileage = ? WHERE id = ?", (mileage, vehicle_id))
-    conn.commit()
-    conn.close()
+def get_fuel_history(vehicle_id):
+    logs = db.reference(f'logs/{vehicle_id}/fuel').get()
+    return list(logs.values()) if logs else []
 
-def get_fuel_history(vehicle_id: int) -> list:
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM fuel_logs WHERE vehicle_id = ? ORDER BY mileage ASC", (vehicle_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+def log_visual_inspection(vehicle_id, file_path, mileage, label):
+    db.reference(f'logs/{vehicle_id}/visual').push({'file_path': file_path, 'mileage': mileage, 'label': label})
 
-def log_visual_inspection(vehicle_id: int, file_path: str, mileage: int, label: str):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO visual_inspections (vehicle_id, file_path, mileage, label) VALUES (?, ?, ?, ?)", (vehicle_id, file_path, mileage, label))
-    conn.commit()
-    conn.close()
+def get_visual_inspections(vehicle_id):
+    logs = db.reference(f'logs/{vehicle_id}/visual').get()
+    return list(logs.values()) if logs else []
 
-def get_visual_inspections(vehicle_id: int) -> list:
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM visual_inspections WHERE vehicle_id = ? ORDER BY mileage DESC", (vehicle_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+def get_indexed_rag_store_for_vehicle(vehicle_id):
+    store = db.reference(f'rag_stores/{vehicle_id}').get()
+    return store.get('store_name') if store else ""
 
-def get_indexed_rag_store_for_vehicle(vehicle_id: int) -> str:
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT store_name FROM rag_stores WHERE vehicle_id = ?", (vehicle_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row[0] if row else ""
+def log_indexed_rag_store_for_vehicle(vehicle_id, store_name, file_name):
+    db.reference(f'rag_stores/{vehicle_id}').set({'store_name': store_name, 'file_name': file_name})
 
-def log_indexed_rag_store_for_vehicle(vehicle_id: int, store_name: str, file_name: str):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO rag_stores (vehicle_id, store_name, file_name) VALUES (?, ?, ?)", (vehicle_id, store_name, file_name))
-    conn.commit()
-    conn.close()
+def update_vehicle_details(vehicle_id, make, model, year, color):
+    users = db.reference('users').get()
+    for uid, data in users.items():
+        if 'vehicles' in data and vehicle_id in data['vehicles']:
+            db.reference(f'users/{uid}/vehicles/{vehicle_id}').update({'make': make, 'model': model, 'year': year, 'color': color})
 
-def search_web_for_motorcycle_specs(query: str) -> str:
-    try:
-        results = []
-        for url in search(query, num_results=3):
-            results.append(url)
-        return f"Search successful. Found specs at these URLs: {', '.join(results)}."
-    except Exception as e:
-        return f"Search failed due to an error: {str(e)}"
-
+# --- III. UI, CSS, AND MAIN LOGIC ---
+# (The rest of your original CSS and Tab logic remains exactly as you had it below this)
 # =====================================================================
 # II. STREAMLIT GLOBAL GOOGLE MATERIAL DESIGN INJECTION (CSS OVERRIDES)
 # =====================================================================
